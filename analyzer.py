@@ -1,13 +1,14 @@
 import exporter
-from PIL import Image, ImageDraw
-
-score = 0
-intersectionLength = 0
+import math
 
 def calculateSimilarity(username1,username2):
 
-    user1data = exporter.fetch_all_game_data(f"https://backloggd.com/u/{username1}/games/")
-    user2data = exporter.fetch_all_game_data(f"https://backloggd.com/u/{username2}/games/")
+    driver = createDriver()
+
+    user1data = exporter.fetch_all_game_data_with_driver(f"https://backloggd.com/u/{username1}/games/", driver)
+    user2data = exporter.fetch_all_game_data_with_driver(f"https://backloggd.com/u/{username2}/games/", driver)
+
+    driver.quit()
 
     lookup = {k: v for k, v in user2data}
 
@@ -16,40 +17,36 @@ def calculateSimilarity(username1,username2):
     intersectionLength = len(intersection)
 
     if(intersectionLength ==0):
-        return
+        return 0
 
-    totalLen = len(user1data) + len(user2data) - intersectionLength
+    intersection_len = len(intersection)
+    union_len = len(user1data) + len(user2data) - intersection_len
+    overlap_fraction = intersection_len / union_len
+    baseScore = overlap_fraction * 100
 
-    gameOverlap = intersectionLength/totalLen
+    user1Avg = sum(t[1] for t in intersection) / intersection_len
+    user2Avg = sum(t[2] for t in intersection) / intersection_len
 
-    gameOverlapScore = gameOverlap * 50
+    user1_diffs = [t[1] - user1Avg for t in intersection]
+    user2_diffs = [t[2] - user2Avg for t in intersection]
 
-    reviewOverlapScore = 50
+    dot_product = sum(a * b for a, b in zip(user1_diffs, user2_diffs))
+    mag1 = math.sqrt(sum(a ** 2 for a in user1_diffs))
+    mag2 = math.sqrt(sum(b ** 2 for b in user2_diffs))
 
-    user1TotalReview = 0
-    user2TotalReview = 0
+    if mag1 == 0 or mag2 == 0:
+        cosine_similarity = 0
+    else:
+        cosine_similarity = dot_product / (mag1 * mag2)
 
-    for tup in intersection:
-        if(tup[1] == 0 or tup[2] == 0):
-            intersection.remove(tup)
-        else:
-            user1TotalReview += tup[1]
-            user2TotalReview += tup[2]
+    ratingBonus = cosine_similarity * 100
 
-    user1Avg = user1TotalReview/len(intersection)
-    user2Avg = user2TotalReview/len(intersection)
+    final_score = baseScore + ratingBonus
+    final_score = max(0, min(100, final_score))
 
-    for tup in intersection:
-        user1Score = tup[1] - user1Avg 
-        user2Score = tup[2] - user2Avg
-        dif = abs(user1Score - user2Score)
-        reviewOverlapScore -= (dif / 4.5) * (50 / len(intersection))
+    return round(final_score, 2)
 
-        score = max(0, score)
+def createDriver():
+    return exporter.init_driver_with_cookies()
 
-    score = reviewOverlapScore + gameOverlapScore
-
-
-
-image = Image.new('RGB', (360, 540), color='black')
-draw = ImageDraw.Draw(image)
+print(calculateSimilarity("cangaz","Rotary"))

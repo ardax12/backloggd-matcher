@@ -1,29 +1,59 @@
+import time
+import json
 import csv
-import requests
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from bs4 import BeautifulSoup
-import argparse
+from webdriver_manager.chrome import ChromeDriverManager
 
-# Fetch the game entries from a specific profile page
-def fetch_profile_page(profile_url, page):
+COOKIE_FILE = "cookies.json"
+
+def load_cookies():
+    with open(COOKIE_FILE, "r") as f:
+        return json.load(f)
+
+def init_driver_with_cookies():
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-software-rasterizer")
+    options.add_argument("--disable-features=Translate,BackForwardCache,WebRtcHideLocalIpsWithMdns")
+    options.add_argument("--disable-background-networking")
+    options.add_argument("--disable-sync")
+    options.add_argument("--metrics-recording-only")
+    options.add_argument("--disable-default-apps")
+    options.add_argument("--mute-audio")
+    options.add_argument("--no-first-run")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-popup-blocking")
+    options.add_argument("--disable-background-timer-throttling")
+    options.add_argument("--disable-renderer-backgrounding")
+    options.add_argument("--ignore-certificate-errors")
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    driver.get("https://backloggd.com")
+
+    for cookie in load_cookies():
+        try:
+            driver.add_cookie(cookie)
+        except Exception as e:
+            print("Cookie add failed:", e)
+
+    return driver
+
+def fetch_profile_page(driver, profile_url, page):
     try:
-        paginated_url = f"{profile_url}?page={page}"  # Append the page number to the profile URL
-        response = requests.get(paginated_url)
-        response.raise_for_status()  # Raise an HTTPError for bad responses
-
-        soup = BeautifulSoup(response.content, "html.parser")
-        game_entries = soup.select(
-            ".rating-hover"
-        )  # Select all game entries with the "rating-hover" class
-
-        if not game_entries:  # Check if no games are found on the page
-            return []
-
+        paginated_url = f"{profile_url}?page={page}"
+        driver.get(paginated_url)
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        game_entries = soup.select(".rating-hover")
         return game_entries
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching page {page}: {e}")
+    except Exception as e:
+        print(f"Error on page {page}: {e}")
         return []
 
-# Extract title and rating data from the fetched game entries
 def extract_game_data(game_entries):
     game_data = []
     for game_entry in game_entries:
@@ -61,68 +91,95 @@ def extract_game_data(game_entries):
     return game_data
 
 
-
-# Fetch all game data by iterating through pages until no new data is found
 def fetch_all_game_data(profile_url):
+    driver = init_driver_with_cookies()
     all_game_data = []
+    seen_hashes = set()
     page = 1
-    previous_page_data_hash = None
+
+    try:
+        while True:
+            print(f"Fetching page {page}...")
+            game_entries = fetch_profile_page(driver, profile_url, page)
+
+            if not game_entries:
+                print("No entries found. Ending.")
+                break
+
+            # Hash the raw HTML of game entries to detect duplicates
+            html_chunk = "".join(str(e) for e in game_entries)
+            current_hash = hash(html_chunk)
+            if current_hash in seen_hashes:
+                print("Duplicate page detected. Ending.")
+                break
+            seen_hashes.add(current_hash)
+
+            game_data = extract_game_data(game_entries)
+            if not game_data:
+                print("No new data. Ending.")
+                break
+
+            all_game_data.extend(game_data)
+            page += 1
+    finally:
+        driver.quit()
+
+    return all_game_data
+
+def save_to_csv(username, game_data):
+    filename = f"{username}_games.csv"
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Title", "Rating"])
+        writer.writerows(game_data)
+    print(f"Data saved to {filename}")
+
+
+def fetch_all_game_data_with_driver(profile_url, driver):
+
+    all_game_data = []
+    seen_hashes = set()
+    page = 1
 
     while True:
         print(f"Fetching page {page}...")
-        game_entries = fetch_profile_page(profile_url, page)
+        game_entries = fetch_profile_page(driver, profile_url, page)
 
-        # Detect duplicate or empty pages to stop scraping
-        current_page_data_hash = hash(tuple(game_entries)) if game_entries else None
-        if not game_entries or current_page_data_hash == previous_page_data_hash:
-            if not game_entries:
-                print("No more game entries found. Stopping scraping.")
-            elif current_page_data_hash == previous_page_data_hash:
-                print("Duplicate page data found. Stopping scraping.")
+        if not game_entries:
+            print("No entries found. Ending.")
             break
 
+        # Hash the raw HTML of game entries to detect duplicates
+        html_chunk = "".join(str(e) for e in game_entries)
+        current_hash = hash(html_chunk)
+        if current_hash in seen_hashes:
+            print("Duplicate page detected. Ending.")
+            break
+        seen_hashes.add(current_hash)
+
         game_data = extract_game_data(game_entries)
-        all_game_data.extend(game_data)  # Add the extracted data to the result list
-        previous_page_data_hash = current_page_data_hash
+        if not game_data:
+            print("No new data. Ending.")
+            break
+
+        all_game_data.extend(game_data)
         page += 1
 
     return all_game_data
 
-# Save the fetched game data to a CSV file
-def save_to_csv(username, game_data):
-    filename = f"{username}_games.csv"
-    print(f"Saving data to {filename}...")
-    try:
-        with open(filename, mode="w", newline="", encoding="utf-8") as file:
-            writer = csv.writer(file)
-            writer.writerow(["Title", "Rating"])  # Write the header row
-            writer.writerows(game_data)  # Write the game data
-        print(f"Data saved to {filename}")
-    except IOError as e:
-        print(f"Error saving data to {filename}: {e}")
-
 if __name__ == "__main__":
     import argparse
-
-    # Command-line argument parsing
-    parser = argparse.ArgumentParser(
-        description="Scrape game data from a Backloggd profile and save to a CSV file."
-    )
-    parser.add_argument(
-        "profile_url_or_username",
-        type=str,
-        help="Backloggd profile URL or username (e.g., https://backloggd.com/u/username/games/ or simply 'username')",
-    )
+    parser = argparse.ArgumentParser(description="Backloggd scraper with headless Selenium")
+    parser.add_argument("profile_url_or_username", type=str)
     args = parser.parse_args()
 
-    # Determine if input is a full URL or just a username
     if args.profile_url_or_username.startswith("http"):
         profile_url = args.profile_url_or_username
-        username = profile_url.split("/u/")[1].split("/")[0]  # Extract username from the URL
+        username = profile_url.split("/u/")[1].split("/")[0]
     else:
         username = args.profile_url_or_username
-        profile_url = f"https://backloggd.com/u/{username}/games/"  # Construct URL from the username
+        profile_url = f"https://backloggd.com/u/{username}/games/"
 
-    print(f"Scraping data for username: {username}")
-    all_game_data = fetch_all_game_data(profile_url) 
-    save_to_csv(username, all_game_data)  # Save the data to a CSV file
+    print(f"Scraping for: {username}")
+    game_data = fetch_all_game_data(profile_url)
+    save_to_csv(username, game_data)
